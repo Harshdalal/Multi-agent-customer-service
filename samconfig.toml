@@ -1,0 +1,9 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "multi-agent-customer-service"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"
+region = "us-east-1"
+confirm_changeset = true
+parameter_overrides = "AnthropicSecretArn=\"REPLACE_ME\" GuardrailId=\"\""

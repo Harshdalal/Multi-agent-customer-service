@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Multi-agent customer service - a Router (Haiku) that dispatches each ticket to
+  a specialist (Sonnet/Haiku), coordinated by a single stateless Lambda, with
+  conversation state in DynamoDB and replies streamed back over API Gateway
+  WebSocket. Model calls go to the Anthropic API; Bedrock Guardrails run on
+  outbound text.
+
+Parameters:
+  AnthropicSecretArn:
+    Type: String
+    Description: ARN of the Secrets Manager secret holding the Anthropic API key (key "api_key").
+  GuardrailId:
+    Type: String
+    Default: ""
+    Description: Optional Bedrock Guardrail id for outbound PII masking / safety.
+  GuardrailVersion:
+    Type: String
+    Default: "DRAFT"
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 60
+    MemorySize: 512
+    Architectures: [arm64]
+
+Resources:
+
+  ConversationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-conversations"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: conversation_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: conversation_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  HumanHandoffQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-human-handoff"
+      MessageRetentionPeriod: 1209600
+
+  TranscriptsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-transcripts-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ---------- WebSocket API ----------
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-ws"
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: "$request.body.action"
+
+  CoordinatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-coordinator"
+      CodeUri: src/
+      Handler: orchestrator.handler.lambda_handler
+      Environment:
+        Variables:
+          STORE_BACKEND: dynamodb
+          TABLE_NAME: !Ref ConversationsTable
+          HUMAN_HANDOFF_QUEUE_URL: !Ref HumanHandoffQueue
+          TRANSCRIPTS_BUCKET: !Ref TranscriptsBucket
+          ANTHROPIC_SECRET_ARN: !Ref AnthropicSecretArn
+          GUARDRAIL_ID: !Ref GuardrailId
+          GUARDRAIL_VERSION: !Ref GuardrailVersion
+          ROUTER_MODEL: claude-haiku-4-5-20251001
+          SPECIALIST_MODEL: claude-sonnet-5
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConversationsTable
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt HumanHandoffQueue.QueueName
+        - S3WritePolicy:
+            BucketName: !Ref TranscriptsBucket
+        - Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: !Ref AnthropicSecretArn
+            - Effect: Allow
+              Action: bedrock:ApplyGuardrail
+              Resource: "*"
+            - Effect: Allow
+              Action: execute-api:ManageConnections
+              Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*"
+
+  CoordinatorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref CoordinatorFunction
+      Principal: apigateway.amazonaws.com
+
+  CoordinatorIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CoordinatorFunction.Arn}/invocations"
+
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$connect"
+      Target: !Sub "integrations/${CoordinatorIntegration}"
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$disconnect"
+      Target: !Sub "integrations/${CoordinatorIntegration}"
+
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$default"
+      Target: !Sub "integrations/${CoordinatorIntegration}"
+
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: prod
+      AutoDeploy: true
+
+Outputs:
+  WebSocketUrl:
+    Description: Connect URL for the chat client.
+    Value: !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+  ConversationsTableName:
+    Value: !Ref ConversationsTable
+  HumanHandoffQueueUrl:
+    Value: !Ref HumanHandoffQueue
+  TranscriptsBucketName:
+    Value: !Ref TranscriptsBucket
