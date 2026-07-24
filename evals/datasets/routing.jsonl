@@ -1,0 +1,12 @@
+{"message": "I was charged twice for my subscription this month", "expected": "billing"}
+{"message": "can I get a refund for the duplicate payment on my card", "expected": "billing"}
+{"message": "where do I find my last invoice", "expected": "billing"}
+{"message": "your api keeps returning a 500 error on every request", "expected": "technical"}
+{"message": "the dashboard is really slow and the integration times out", "expected": "technical"}
+{"message": "how do I install the cli, it crashes on start", "expected": "technical"}
+{"message": "I need to reset my password, I cannot sign in", "expected": "account"}
+{"message": "please update my profile email address", "expected": "account"}
+{"message": "how do I turn on 2fa for my account", "expected": "account"}
+{"message": "this is unacceptable, I want to speak to a human supervisor", "expected": "escalation"}
+{"message": "I am furious and considering a lawsuit", "expected": "escalation"}
+{"message": "get me a manager right now", "expected": "escalation"}
